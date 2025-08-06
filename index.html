@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>嵌套工作流编辑器</title>
+    <link rel="stylesheet" type="text/css" href="https://cdnjs.cloudflare.com/ajax/libs/jointjs/3.7.7/joint.css" />
+    <style>
+        body, html {
+            height: 100%;
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+            background-color: #f9f9f9;
+            display: flex;
+            flex-direction: column;
+        }
+        #app {
+            display: flex;
+            flex-grow: 1;
+            overflow: hidden;
+        }
+        #stencil {
+            width: 240px;
+            height: 100%;
+            position: relative;
+            border-right: 1px solid #e0e0e0;
+            background-color: #fff;
+        }
+        #paper-container {
+            flex-grow: 1;
+            height: 100%;
+            overflow: auto;
+            background-color: #f0f0f0;
+        }
+        #paper {
+            background-color: #fff;
+        }
+        .joint-stencil {
+            background-color: #fff;
+        }
+        .joint-stencil .group-label {
+            font-weight: bold;
+            font-size: 16px;
+            padding: 10px;
+            background-color: #f5f5f5;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        .joint-element .body {
+            transition: fill 0.2s ease;
+        }
+        .joint-element:hover .body {
+            fill: #e9e9e9;
+        }
+        /* Dialog styles */
+        dialog {
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            width: 400px;
+        }
+        dialog::backdrop {
+            background: rgba(0, 0, 0, 0.5);
+        }
+        dialog h2 {
+            margin-top: 0;
+        }
+        dialog label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        dialog input {
+            width: calc(100% - 16px);
+            padding: 8px;
+            margin-bottom: 15px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        dialog button {
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        dialog button.primary {
+            background-color: #007bff;
+            color: white;
+        }
+        dialog button.secondary {
+            background-color: #f0f0f0;
+        }
+    </style>
+</head>
+<body>
+
+<div id="app">
+    <div id="stencil"></div>
+    <div id="paper-container">
+        <div id="paper"></div>
+    </div>
+</div>
+
+<dialog id="editDialog">
+    <h2>编辑节点</h2>
+    <form id="editForm">
+        <input type="hidden" id="nodeId">
+        <label for="nodeLabel">标签:</label>
+        <input type="text" id="nodeLabel" name="label">
+        <label for="nodeColor">背景颜色:</label>
+        <input type="color" id="nodeColor" name="color" style="padding: 0; height: 35px;">
+        <div>
+            <button type="submit" class="primary">保存</button>
+            <button type="button" class="secondary" onclick="document.getElementById('editDialog').close()">取消</button>
+        </div>
+    </form>
+</dialog>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/backbone.js/1.4.1/backbone.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jointjs/3.7.7/joint.js"></script>
+
+<script>
+    const { dia, shapes, ui } = joint;
+
+    const graph = new dia.Graph({}, { cellNamespace: shapes });
+    const paper = new dia.Paper({
+        el: document.getElementById('paper'),
+        model: graph,
+        width: 2000,
+        height: 1500,
+        gridSize: 10,
+        drawGrid: true,
+        background: {
+            color: '#ffffff'
+        },
+        cellViewNamespace: shapes,
+        embeddingMode: true, // 启用嵌套
+        validateEmbedding: function(childView, parentView) {
+            // 只允许 'container' 类型的元素作为父节点
+            return parentView.model.get('type') === 'app.Container';
+        },
+        validateConnection: function(cellViewS, magnetS, cellViewT, magnetT, end, linkView) {
+            // 防止连接到父节点
+            if (cellViewS === cellViewT) return false;
+            // 只允许从端口连接到端口
+            return magnetS && magnetT;
+        },
+        defaultLink: () => new shapes.standard.Link({
+            attrs: {
+                line: {
+                    stroke: '#666',
+                    strokeWidth: 2,
+                    targetMarker: {
+                        'type': 'path',
+                        'd': 'M 10 -5 L 0 0 L 10 5 z'
+                    }
+                }
+            }
+        }),
+    });
+
+    // --- 自定义形状 ---
+    shapes.app = {};
+
+    shapes.app.Container = shapes.standard.Rectangle.define('app.Container', {
+        attrs: {
+            body: {
+                fill: '#f0f0f0',
+                stroke: '#dcdcdc',
+                strokeWidth: 2,
+                rx: 5,
+                ry: 5
+            },
+            label: {
+                text: '容器',
+                fill: '#333',
+                fontSize: 14,
+                fontWeight: 'bold'
+            }
+        },
+        // 标记为容器
+        isContainer: true
+    });
+
+    const createPort = (group) => ({
+        group: group,
+        attrs: {
+            circle: {
+                r: 5,
+                magnet: true,
+                stroke: '#31d0c6',
+                strokeWidth: 2,
+                fill: '#fff'
+            }
+        }
+    });
+
+    const ports = {
+        groups: {
+            'in': { position: 'left', label: { position: 'left' } },
+            'out': { position: 'right', label: { position: 'right' } }
+        },
+        items: [ createPort('in'), createPort('out') ]
+    };
+
+    // --- Stencil (拖拽面板) ---
+    const stencil = new ui.Stencil({
+        paper: paper,
+        width: 240,
+        groups: {
+            nodes: { label: '基础节点', index: 1 },
+            containers: { label: '容器', index: 2 }
+        }
+    });
+
+    document.getElementById('stencil').appendChild(stencil.el);
+
+    const rect = new shapes.standard.Rectangle({
+        position: { x: 0, y: 0 },
+        size: { width: 100, height: 60 },
+        attrs: {
+            body: { fill: '#a6d1e6', stroke: '#3c486b', rx: 5, ry: 5 },
+            label: { text: '任务', fill: 'black' }
+        },
+        ports: { ...ports }
+    });
+
+    const circle = new shapes.standard.Ellipse({
+        position: { x: 0, y: 0 },
+        size: { width: 100, height: 60 },
+        attrs: {
+            body: { fill: '#fde792', stroke: '#f5b700' },
+            label: { text: '判断', fill: 'black' }
+        },
+        ports: { ...ports }
+    });
+
+    const container = new shapes.app.Container({
+        position: { x: 0, y: 0 },
+        size: { width: 300, height: 200 }
+    });
+
+    stencil.load({
+        nodes: [rect, circle],
+        containers: [container]
+    });
+    stencil.render();
+
+    // --- 嵌套逻辑 ---
+    graph.on('change:position', function(cell) {
+        // 如果移动的是父节点，其子节点会自动跟随
+        // 如果移动的是子节点，检查是否脱离父节点
+        const parentId = cell.get('parent');
+        if (!parentId) return;
+
+        const parent = graph.getCell(parentId);
+        if (!parent.getBBox().containsPoint(cell.getBBox().center())) {
+            // 从父节点中移除
+            parent.unembed(cell);
+        }
+    });
+
+    paper.on('element:pointerup', function(elementView, evt) {
+        const element = elementView.model;
+        const parent = graph.getCells().find(c =>
+            c.get('isContainer') &&
+            c.id !== element.id &&
+            c.getBBox().containsPoint(element.getBBox().center())
+        );
+
+        if (parent) {
+            // 将元素嵌入到父节点中
+            parent.embed(element);
+        }
+    });
+
+    // --- 编辑对话框 ---
+    const editDialog = document.getElementById('editDialog');
+    const editForm = document.getElementById('editForm');
+    const nodeIdInput = document.getElementById('nodeId');
+    const nodeLabelInput = document.getElementById('nodeLabel');
+    const nodeColorInput = document.getElementById('nodeColor');
+
+    paper.on('element:button:pointerdown', (elementView, evt) => {
+        evt.stopPropagation(); // 防止触发 paper 的其他事件
+        const element = elementView.model;
+        nodeIdInput.value = element.id;
+        nodeLabelInput.value = element.attr('label/text') || '';
+        
+        const currentColor = element.attr('body/fill');
+        nodeColorInput.value = currentColor;
+
+        editDialog.showModal();
+    });
+
+    editForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const nodeId = nodeIdInput.value;
+        const nodeLabel = nodeLabelInput.value;
+        const nodeColor = nodeColorInput.value;
+        const element = graph.getCell(nodeId);
+
+        if (element) {
+            element.attr('label/text', nodeLabel);
+            element.attr('body/fill', nodeColor);
+        }
+        editDialog.close();
+    });
+
+    // --- 为元素添加编辑按钮 ---
+    const addEditingTools = (elementView) => {
+        const editButton = new dia.ElementView.ToolItem({
+            markup: `
+                <g class="element-tool-button">
+                    <circle r="11" fill="#007bff"></circle>
+                    <path transform="scale(0.8) translate(-16, -16)" d="M25.771,9.334l-3.104-3.104c-0.488-0.488-1.28-0.488-1.768,0l-2.053,2.053l4.872,4.872l2.053-2.053 C26.259,10.614,26.259,9.822,25.771,9.334z M20.904,10.102l-4.872-4.872L6.33,14.934v4.872h4.872L20.904,10.102z M4.33,21.806h23.339v2H4.33V21.806z"></path>
+                </g>
+            `,
+            offset: { x: 15, y: 15 },
+            action: 'edit'
+        });
+
+        const toolsView = new dia.ToolsView({
+            tools: [editButton]
+        });
+        elementView.addTools(toolsView);
+    };
+
+    paper.on('element:mouseenter', addEditingTools);
+
+    paper.on('element:mouseleave', (elementView) => {
+        elementView.removeTools();
+    });
+
+</script>
+</body>
+</html>
